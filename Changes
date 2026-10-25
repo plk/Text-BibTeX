@@ -42,6 +42,9 @@ Revision history for Perl module Text::BibTeX
    needs Config::AutoConf or ExtUtils::LibBuilder.
  * New: Text::BibTeX::unicode_version(); a stand-alone fuzzing harness
    for the C library (fuzz/).
+ * Text::BibTeX::Error objects record the entry key (key) and the calling
+   location (caller_file, caller_line); name warnings from
+   Text::BibTeX::Entry::names number names from 1.
  * Requires Perl 5.26.
 
 0.91 2025-01-29

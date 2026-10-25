@@ -49,6 +49,9 @@ sub filename  { $_[0]{filename} }
 sub line      { $_[0]{line} }
 sub item_desc { $_[0]{item_desc} }
 sub item      { $_[0]{item} }
+sub key       { $_[0]{key} }
+sub caller_file { $_[0]{caller_file} }
+sub caller_line { $_[0]{caller_line} }
 
 # Is this error serious enough to make an entry fail to parse?
 sub is_serious {
@@ -70,7 +73,7 @@ sub as_string {
    push @where, $self->class if defined $self->class;
    my $s = @where ? join(', ', @where) . ": $self->{message}" : $self->{message};
    $s .= " at $self->{caller_file} line $self->{caller_line}.\n"
-      if defined $self->{caller_file};
+      if $self->is_fatal && defined $self->{caller_file};
    return $s;
 }
 
@@ -118,8 +121,13 @@ sub _stderr_is_utf8 {
 sub _dispatch {
    my ($errors, $entry) = @_;
 
-   push @{$entry->{errors}}, @$errors
-      if ref $entry && Scalar::Util::reftype($entry) eq 'HASH';
+   my $is_entry = ref $entry && Scalar::Util::reftype($entry) eq 'HASH';
+   my ($file, $line) = (_caller_frame())[1, 2];
+   for my $err (@$errors) {
+      @{$err}{qw(caller_file caller_line)} = ($file, $line);
+      $err->{key} = $entry->{key} if $is_entry && defined $entry->{key};
+   }
+   push @{$entry->{errors}}, @$errors if $is_entry;
 
    my $policy;
    for my $err (@$errors) {
@@ -127,10 +135,7 @@ sub _dispatch {
          $Handler->($err);
          next;
       }
-      if ($err->is_fatal) {
-         @{$err}{qw(caller_file caller_line)} = (_caller_frame())[1, 2];
-         die $err;
-      }
+      die $err if $err->is_fatal;
       $policy //= _policy();
       next if $policy eq 'off';
       die $err if $policy eq 'fatal';
@@ -243,6 +248,18 @@ Where the problem was found, if known.
 
 For problems with one item in a list (eg. the second name in a list of
 names), a description of the item (eg. C<"name">) and its number.
+
+=item key
+
+The key of the entry being parsed when the problem was found, if any.
+
+=item caller_file
+
+=item caller_line
+
+The place in your program where Text::BibTeX was called (the innermost
+caller outside Text::BibTeX).  This is added to the message of fatal
+errors.
 
 =item errclass
 

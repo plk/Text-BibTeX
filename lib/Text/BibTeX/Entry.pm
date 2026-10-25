@@ -748,7 +748,7 @@ sub names
       # an empty name (eg. from "and and") becomes an empty Name object
       $names[$i] = Text::BibTeX::Name->new(
         {binmode => $self->_binmode, normalization => $self->_norm},
-        $names[$i] // '', $filename, $line, $i);
+        $names[$i] // '', $filename, $line, $i + 1);
    }
    @names;
 }

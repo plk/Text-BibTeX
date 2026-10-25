@@ -146,6 +146,22 @@ like($@, qr/invalid name format/, 'bad name format croaks');
    is($n[1]->format(Text::BibTeX::NameFormat->new('fvlj')), '', '...formats as empty');
 }
 
+# Errors know the entry key and where Text::BibTeX was called from;
+# name warnings from Entry->names number the names from 1
+{
+   my @seen;
+   local $Text::BibTeX::Error::Handler = sub { push @seen, shift };
+   my $e = Text::BibTeX::Entry->new('@misc{thekey, title = undefinedmac, author = {Smith and Jones, A, B, C}}');
+   is($seen[0]->key, 'thekey', 'error knows the entry key');
+   is($seen[0]->caller_file, __FILE__, 'caller_file');
+   ok($seen[0]->caller_line > 0, 'caller_line');
+   unlike("$seen[0]", qr/ at \S+ line/, 'non-fatal errors are not stringified with the caller');
+   @seen = ();
+   $e->names('author');
+   is("$seen[0]", 'line 1, name 2, warning: too many commas in name (removing extras)',
+      'second name is "name 2"');
+}
+
 # Reusing an entry object starts a fresh error list
 {
    local $Text::BibTeX::Error::Handler = sub { };
