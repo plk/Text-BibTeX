@@ -18,12 +18,12 @@
 
 package Text::BibTeX::NameFormat;
 
-require 5.004;
-
+use 5.026;
 use strict;
+use warnings;
 use Carp;
-use vars qw'$VERSION';
-$VERSION = 0.88;
+
+our $VERSION = '1.00';
 
 =head1 NAME
 
@@ -123,7 +123,7 @@ sub new
    $parts ||= "fvlj";
    $abbrev_first = defined($abbrev_first)? $abbrev_first : 0;
 
-   die unless $parts =~ /^[fvlj]{1,4}$/;
+   croak "invalid name format \"$parts\"" unless $parts =~ /^[fvlj]{1,4}$/;
 
    $class = ref ($class) || $class;
    my $self = bless {}, $class;
@@ -134,9 +134,7 @@ sub new
 
 sub DESTROY
 {
-   my $self = shift;
-   free ($self->{'_cstruct'}) 
-      if defined $self->{'_cstruct'};
+   # the C structure is freed with its Perl wrapper
 }
 
 
@@ -164,25 +162,8 @@ sub set_text
 {
    my ($self, $part, $pre_part, $post_part, $pre_token, $post_token) = @_;
 
-   # Engage in a little conspiracy with the XS code (_set_text) and the
-   # underlying C function (bt_set_format_text) here.  In particular,
-   # neither of those functions copy the strings we pass in here -- they
-   # just copy the C pointers.  Ultimately, those refer back to the Perl
-   # strings that we're passing in now.  Thus, if those Perl strings
-   # were to go away (ref count drop to zero), then the C code might
-   # have dangling pointers to free'd strings -- oops!  The solution is
-   # to keep references of those Perl strings here, so that their ref
-   # count can never drop to zero without our assent.  Every time
-   # set_text is called, the old references are overridden (ref count
-   # drops), and when the NameFormat object is destroyed, we destroy
-   # them (ref count drops).  Other than that, there will always be some
-   # reference to the strings passed in to set_text.
-
-   # XXX what if some of these are undef?
-
-   $self->{'textrefs'} = [\$pre_part, \$post_part, \$pre_token, \$post_token];
-
-   _set_text ($self->{'_cstruct'}, 
+   # The C code keeps its own copies of these strings
+   _set_text ($self->{'_cstruct'},
               $part,
               $pre_part,
               $post_part,
@@ -245,12 +226,9 @@ sub apply
       croak "invalid Name object: no C structure";
    my $format_struct = $self->{'_cstruct'} ||
       croak "invalid NameFormat object: no C structure";
- 
-   my $ans = format_name ($name_struct, $format_struct);
-
-   $ans = Text::BibTeX->_process_result($ans, $name->{binmode}, $name->{normalization});
-   
-   return $ans;
+   my $utf8 = ($name->{binmode} // 'utf-8') eq 'utf-8';
+   my $ans = format_name ($name_struct, $format_struct, $utf8 ? 1 : 0);
+   return $utf8 ? Text::BibTeX::_normalise($name->{normalization} // 'NFC', $ans) : $ans;
 }
 
 =back

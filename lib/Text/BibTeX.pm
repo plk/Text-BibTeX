@@ -13,84 +13,130 @@
 # ----------------------------------------------------------------------
 
 package Text::BibTeX;
-use Text::BibTeX::Name;
-use Text::BibTeX::NameFormat;
 
-use 5.008001;                          # needed for Text::BibTeX::Entry
-
+use 5.026;
 use strict;
+use warnings;
+use warnings::register;                 # the 'Text::BibTeX' warnings category
+
 use Carp;
-use vars qw(@ISA @EXPORT @EXPORT_OK %EXPORT_TAGS $AUTOLOAD);
+use Encode ();
+use Unicode::Normalize ();
+use Exporter 'import';
 
-require Exporter;
-require DynaLoader;
+our $VERSION = '1.00';
 
-our $VERSION = '0.91';
+our %EXPORT_TAGS = (nodetypes => [qw(BTAST_STRING BTAST_MACRO BTAST_NUMBER)],
+                    metatypes => [qw(BTE_UNKNOWN BTE_REGULAR BTE_COMMENT
+                                     BTE_PREAMBLE BTE_MACRODEF)],
+                    nameparts => [qw(BTN_FIRST BTN_VON BTN_LAST BTN_JR BTN_NONE)],
+                    joinmethods => [qw(BTJ_MAYTIE BTJ_SPACE
+                                       BTJ_FORCETIE BTJ_NOTHING)],
+                    subs      => [qw(bibloop split_list
+                                     purify_string change_case)],
+                    macrosubs => [qw(add_macro_text
+                                     delete_macro
+                                     delete_all_macros
+                                     macro_length
+                                     macro_text)]);
+our @EXPORT_OK = (@{$EXPORT_TAGS{'subs'}},
+                  @{$EXPORT_TAGS{'macrosubs'}},
+                  @{$EXPORT_TAGS{'nodetypes'}},
+                  @{$EXPORT_TAGS{'nameparts'}},
+                  @{$EXPORT_TAGS{'joinmethods'}},
+                  'check_class', 'display_list' );
+our @EXPORT = @{$EXPORT_TAGS{'metatypes'}};
 
-@ISA = qw(Exporter DynaLoader);
-%EXPORT_TAGS = (nodetypes => [qw(BTAST_STRING BTAST_MACRO BTAST_NUMBER)],
-                metatypes => [qw(BTE_UNKNOWN BTE_REGULAR BTE_COMMENT 
-                                 BTE_PREAMBLE BTE_MACRODEF)],
-                nameparts => [qw(BTN_FIRST BTN_VON BTN_LAST BTN_JR BTN_NONE)],
-                joinmethods => [qw(BTJ_MAYTIE BTJ_SPACE 
-                                   BTJ_FORCETIE BTJ_NOTHING)],
-                subs      => [qw(bibloop split_list
-                                 purify_string change_case)],
-                macrosubs => [qw(add_macro_text
-                                 delete_macro
-                                 delete_all_macros
-                                 macro_length
-                                 macro_text)]);
-@EXPORT_OK = (@{$EXPORT_TAGS{'subs'}},
-              @{$EXPORT_TAGS{'macrosubs'}},
-              @{$EXPORT_TAGS{'nodetypes'}},
-              @{$EXPORT_TAGS{'nameparts'}},
-              @{$EXPORT_TAGS{'joinmethods'}},
-              'check_class', 'display_list' );
-@EXPORT = @{$EXPORT_TAGS{'metatypes'}};
+require XSLoader;
+XSLoader::load('Text::BibTeX', $VERSION);
 
-use Encode 'encode', 'decode';
-use Unicode::Normalize;
+require Text::BibTeX::Error;
+require Text::BibTeX::Name;
+require Text::BibTeX::NameFormat;
 
+# ----------------------------------------------------------------------
+# Strings in and out of the C library
+#
+# In 'utf-8' mode (the default) all strings handed out are Perl character
+# strings, normalised once when they come in (by default to NFC).  In
+# 'bytes' mode strings are passed through untouched, as byte strings.
 
+my %Normalisers = map { $_ => Unicode::Normalize->can($_) } qw(NFC NFD NFKC NFKD);
+
+sub _options {
+   my ($opts) = @_;
+   my %o = map { lc($_) => $opts->{$_} } keys %{$opts || {}};
+   my $binmode = (!defined $o{binmode} || $o{binmode} =~ /^utf-?8$/i)
+      ? 'utf-8' : 'bytes';
+   croak "binmode must be 'utf-8' or 'bytes'"
+      if defined $o{binmode} && $o{binmode} !~ /^(?:utf-?8|bytes|raw)$/i;
+   my $norm = exists $o{normalization} ? $o{normalization} : 'NFC';
+   $norm = 'none' if !defined $norm || $norm eq '';
+   croak "unknown normalization '$norm'"
+      unless $norm eq 'none' || $Normalisers{$norm};
+   return ($binmode, $norm, \%o);
+}
+
+# Normalise a character string (cheaply skipping pure ASCII)
+sub _normalise {
+   my ($norm, $s) = @_;
+   return $s if !defined $s || $norm eq 'none' || $s !~ /[^\x00-\x7f]/;
+   return $Normalisers{$norm}->($s);
+}
+
+# A string coming from the user, in internal form.  In 'utf-8' mode a
+# byte string holding valid UTF-8 is decoded (so encoded and character
+# strings both work); anything else is taken as characters.
+sub _in {
+   my ($binmode, $norm, $s) = @_;
+   return $s if !defined $s || ref $s || $binmode ne 'utf-8';
+   return $s if $s !~ /[^\x00-\x7f]/;
+   if (!utf8::is_utf8($s)) {
+      my $c = $s;
+      $s = $c if utf8::decode($c);
+   }
+   return _normalise($norm, $s);
+}
+
+# A string being handed to the C library: in 'bytes' mode a character
+# string is passed as its UTF-8 encoding (so results come back as bytes);
+# in 'utf-8' mode, as for _in.
+sub _to_c {
+   my ($binmode, $norm, $s) = @_;
+   if ($binmode ne 'utf-8') {
+      if (defined $s && !ref $s && utf8::is_utf8($s)) {
+         $s = "$s";
+         utf8::encode($s);
+      }
+      return $s;
+   }
+   return _in($binmode, $norm, $s);
+}
+
+# Compatibility shims for code that used the old (private) helpers
 sub _process_result {
-  no strict 'refs';
-  my ( $self, $result, $encoding, $norm ) = @_;
-
-  $norm ||= "NFC"; # best to force it here.
-  my $normsub = \&{"$norm"}; # symbolic ref
-    if ( $encoding eq "utf-8" ) {
-        if ( utf8::is_utf8($result) ) {
-            return $normsub->($result);
-        }
-        else {
-            return $normsub->( decode( $encoding, $result ) );
-        }
-    }
-    else { return $result; }
-
+   my ($self, $result, $binmode, $norm) = @_;
+   return $result unless defined $result && ($binmode // '') eq 'utf-8';
+   if (!utf8::is_utf8($result)) {
+      my $c = $result;
+      $result = $c if utf8::decode($c);
+   }
+   return _normalise($norm || 'NFC', $result);
 }
 
 sub _process_argument {
-    my ( $self, $value, $encoding ) = @_;
-
-     if ( $encoding eq "utf-8" && utf8::is_utf8($value)) {
-         return encode( $encoding, $value );
-     }
-     else {
-        return $value;
-    }
+   my ($self, $value, $binmode) = @_;
+   return Encode::encode('UTF-8', $value)
+      if defined $value && ($binmode // '') eq 'utf-8' && utf8::is_utf8($value);
+   return $value;
 }
 
 sub split_list {
     my ( $field, $delim, $filename, $line, $desc, $opts ) = @_;
-    $opts                  ||= {};
-    $opts->{binmode}       ||= 'bytes';
-    $opts->{normalization} ||= 'NFC';
-    return
-        map { Text::BibTeX->_process_result( $_, $opts->{binmode}, $opts->{normalization} ) }
-        Text::BibTeX::isplit_list( $field, $delim, $filename, $line, $desc );
-
+    my ($binmode, $norm) = _options($opts);
+    my @list = Text::BibTeX::isplit_list( _to_c($binmode, $norm, $field), $delim,
+                                          $filename, $line // 0, $desc );
+    return @list;
 }
 
 =encoding UTF-8
@@ -141,6 +187,111 @@ Note that every module described here begins with the C<Text::BibTeX>
 prefix.  For brevity, I have dropped this prefix from most class and
 module names in the rest of this manual page (and in most of the other
 manual pages in the library).
+
+=head1 STRINGS AND UNICODE
+
+By default (C<binmode =E<gt> 'utf-8'>), C<Text::BibTeX> reads its input
+as UTF-8 and every string it gives you -- entry types, keys, field names,
+values, name parts, formatted names -- is a Perl character string,
+normalised once, when it is read, to Unicode Normalization Form C (or
+whichever form you ask for with the C<normalization> option).  Bytes that
+are not valid UTF-8 are replaced by U+FFFD, with a warning; to read files
+in other encodings use the C<encoding> option of
+L<Text::BibTeX::File/open>, or pass in a filehandle with an
+C<:encoding(...)> layer.  Strings you pass in may be character strings or
+UTF-8 encoded byte strings.
+
+Unicode is supported throughout: names (entry types, keys, field and
+macro names) may contain any characters; field names and entry types are
+lowercased, and macro names compared, using full Unicode case mappings;
+and splitting and formatting names, L</purify_string> and
+L</change_case> classify and case-map characters (whole grapheme
+clusters, for initials) according to Unicode.  The Unicode tables are
+built from the Unicode database of the perl C<Text::BibTeX> was built
+with; L</unicode_version> tells you which version that is.
+
+TeX markup is passed through unchanged.  BibTeX's own rules for TeX
+"special characters" such as C<{\'e}> (which count as one character for
+initials, and are treated specially by L</purify_string> and
+L</change_case>) are followed, but TeX is never converted to Unicode or
+back; do that separately if you need to.
+
+With C<binmode =E<gt> 'bytes'> nothing is decoded or normalised: strings
+are passed through as byte strings, exactly as they appear in the input.
+
+=head1 ERRORS AND WARNINGS
+
+Problems found while parsing (syntax errors, undefined macros, malformed
+names, and so on) are reported as L<Text::BibTeX::Error> objects.  Each
+entry keeps the errors found while it was parsed (see
+L<Text::BibTeX::Entry/errors>), and each error is also passed to Perl's
+C<warn>, with the same text as in earlier versions, for example:
+
+   foo.bib, line 12, warning: undefined macro "jan"
+
+so it goes wherever C<STDERR> goes and can be caught with
+C<$SIG{__WARN__}>.  These warnings follow the warnings pragma of the
+calling code, using the category C<Text::BibTeX>: they are on by default,
+are silenced by C<no warnings 'Text::BibTeX'>, and become exceptions
+under C<use warnings FATAL =E<gt> 'Text::BibTeX'>.  Misuse of the library
+is always reported with C<die>.  See L<Text::BibTeX::Error> for details,
+including how to take over reporting completely.
+
+=head1 UPGRADING FROM 0.x
+
+Version 1.00 replaced the C library at the heart of C<Text::BibTeX>.
+Programs written for earlier versions should mostly work unchanged, but
+note the following:
+
+=over 4
+
+=item *
+
+Strings are now returned as Perl character strings by default (as if
+you had given C<binmode =E<gt> 'utf-8'>, which was the recommended
+option).  If your code expects UTF-8 encoded byte strings, pass
+C<binmode =E<gt> 'bytes'> to L<Text::BibTeX::File/open>,
+L<Text::BibTeX::Entry/new> and L<Text::BibTeX::Name/new>.  In C<'utf-8'>
+mode, invalid UTF-8 in the input is now replaced (with a warning) rather
+than passed through.
+
+=item *
+
+Errors and warnings are reported through Perl's C<warn> (see
+L</"ERRORS AND WARNINGS">) instead of being written directly to the C
+library's standard error stream; usage errors throw exceptions instead
+of terminating the program.
+
+=item *
+
+Field names and entry types are lowercased according to Unicode, so
+C<ÉDITOR> becomes C<éditor> (it used to become C<Éditor>), and
+L</purify_string> and L</change_case> now handle non-ASCII letters.
+
+=item *
+
+Error recovery is better: after a syntax error the parser resynchronises
+at the next entry, and a missing closing brace no longer causes the
+following entry to be lost.  Some messages after the first error in a
+damaged file may therefore differ.  "N characters of junk" warnings are
+now reported with the entry that follows the junk.
+
+=item *
+
+Any Perl filehandle can be read from, including in-memory handles and
+handles with I/O layers.
+
+=item *
+
+The B<btparse> C library is no longer installed as a separate shared
+library, and the C<biblex>, C<bibparse> and C<dumpnames> programs that
+came with it are gone.
+
+=item *
+
+Perl 5.26 or later is required.
+
+=back
 
 =head1 MODULES AND CLASSES
 
@@ -252,20 +403,19 @@ sub AUTOLOAD
    # This AUTOLOAD is used to 'autoload' constants from the constant()
    # XS function.
 
-#   print "AUTOLOAD: \$AUTOLOAD=$AUTOLOAD\n";
-
-   my ($constname, $ok, $val);
+   our $AUTOLOAD;
+   my ($constname, $val);
    ($constname = $AUTOLOAD) =~ s/.*:://;
+   return if $constname eq 'DESTROY';
    carp ("Recursive AUTOLOAD--probable compilation error"), return
       if $constname eq 'constant';
    $val = constant ($constname)
       if $constname =~ /^BT/;
    croak ("Unknown Text::BibTeX function: \"$constname\"")
       unless (defined $val);
-   
-#   print "          constant ($constname) returned \"$val\"\n";
 
-   eval "sub $AUTOLOAD { $val }";
+   no strict 'refs';
+   *$AUTOLOAD = sub { $val };
    $val;
 }
 
@@ -273,22 +423,6 @@ sub AUTOLOAD
 require Text::BibTeX::File;
 require Text::BibTeX::Entry;
 
-# Load the XSUB code that's needed to parse BibTeX entries and 
-# the strings in them
-bootstrap Text::BibTeX;
-
-# For the curious: I don't put the call to &initialize into a BEGIN block,
-# because then it would come before the bootstrap above, and &initialize is
-# XS code -- bad!  (The manifestation of this error is rather interesting:
-# Perl calls my AUTOLOAD routine, which then tries to call `constant', but
-# that's also an as-yet-unloaded XS routine, so it falls back to AUTOLOAD,
-# which tries to call `constant' again, ad infinitum.  The moral of the
-# story: beware of what you put in BEGIN blocks in XS-dependent modules!)
-
-initialize();                            # these are both XS functions
-END { &cleanup; }
-
-# This can't go in a BEGIN because of the .XS bootstrapping mechanism
 _define_months();
 
 sub _define_months {
@@ -613,15 +747,20 @@ string-processing functions">.
 
 =head2 Startup/shutdown functions
 
-These just initialize and shutdown the underlying C library.  Don't call
-either one of them; the C<Text::BibTeX> startup/shutdown code takes care
-of it as appropriate.  They're just mentioned here for completeness.
-
-=over 4 
+=over 4
 
 =item initialize ()
 
+Does nothing; kept for compatibility.
+
 =item cleanup ()
+
+Deletes all macros from the global macro table.
+
+=item unicode_version ()
+
+Returns the version of the Unicode database the C library's character
+tables were built from (that of the perl C<Text::BibTeX> was built with).
 
 =back
 
@@ -639,8 +778,11 @@ surrounded by whitespace, and not at the beginning or end of STRING; the
 comparison is case-insensitive.  See L<bt_split_names> for full details
 of how splitting is done (it's I<not> the same as Perl's C<split>
 function). OPTS is a hash ref of the same binmode and normalization
-arguments as with, e.g. Text::BibTeX::File->open(). split_list calls isplit_list()
-internally but handles UTF-8 conversion and normalization, if requested.
+arguments as with, e.g. Text::BibTeX::File->open(); the default is
+C<'utf-8'> mode.
+
+Empty items (as in C<"Smith and and Jones">) are returned as C<undef>,
+with a warning.
 
 Returns the list of strings resulting from splitting STRING on DELIM.
 
@@ -653,27 +795,31 @@ STRING are considered delimiters if they are at brace-depth zero,
 surrounded by whitespace, and not at the beginning or end of STRING; the
 comparison is case-insensitive.  See L<bt_split_names> for full details
 of how splitting is done (it's I<not> the same as Perl's C<split>
-function). This function returns bytes. Use Text::BibTeX::split_list to specify
-the same binmode and normalization arguments as with, e.g. Text::BibTeX::File->open()
+function).  The strings returned are of the same kind as STRING: character
+strings if it was a character string, byte strings otherwise.  Use
+C<split_list> to specify binmode and normalization arguments.
 
 Returns the list of strings resulting from splitting STRING on DELIM.
 
 =item purify_string (STRING [, OPTIONS])
 
 "Purifies" STRING in the BibTeX way (usually for generation of sort
-keys).  See L<bt_misc> for details; note that, unlike the C interface,
-C<purify_string> does I<not> modify STRING in-place.  A purified copy of
-the input string is returned.
+keys): letters and digits (in any script, with any combining marks) and
+spaces are kept, hyphens and ties become spaces, and everything else is
+removed, with special treatment for TeX special characters.  See
+L<bt_misc> for details.  A purified copy of the input string is returned:
+a character string if STRING was one, a byte string otherwise.
 
 OPTIONS is currently unused.
 
 =item change_case (TRANSFORM, STRING [, OPTIONS])
 
 Transforms the case of STRING according to TRANSFORM (a single
-character, one of C<'u'>, C<'l'>, or C<'t'>).  See L<bt_misc> for
-details; again, C<change_case> differs from the C interface in that
-STRING is not modified in-place---the input string is copied, and the
-transformed copy is returned.
+character, one of C<'u'>, C<'l'>, or C<'t'>), using full Unicode case
+mappings, and leaving text in braces alone (except in TeX special
+characters).  See L<bt_misc> for details.  The transformed copy is
+returned: a character string if STRING was one, a byte string otherwise.
+An invalid TRANSFORM throws an exception.
 
 =back
 
@@ -688,21 +834,27 @@ L<Text::BibTeX::Entry>.
 
 =over 4
 
-=item parse (ENTRY_STRUCT, FILENAME, FILEHANDLE)
+=item _parse (ENTRY_STRUCT, PARSER [, PRESERVE])
 
-=item parse_s (ENTRY_STRUCT, TEXT)
+=item _parse_s (ENTRY_STRUCT, TEXT [, PRESERVE [, UTF8]])
+
+PARSER is a C<Text::BibTeX::Parser> object, which wraps a C parser
+reading from a Perl filehandle.
 
 =back
 
 =head2 Macro table functions
 
-These functions allow direct access to the macro table maintained by
-B<btparse>, the C library underlying C<Text::BibTeX>.  In the normal
-course of events, macro definitions always accumulate, and are only
-defined as a result of parsing a macro definition (C<@string>) entry.
-B<btparse> never deletes old macro definitions for you, and doesn't have
-any built-in default macros.  If, for example, you wish to start fresh
-with new macros for every file, use C<delete_all_macros>.  If you wish
+These functions allow direct access to the global macro table.  In the
+normal course of events, macro definitions always accumulate, and are
+only defined as a result of parsing a macro definition (C<@string>)
+entry, so (as in BibTeX) macros defined in one file are available in the
+files read after it.  If, for example, you wish to start fresh with new
+macros for every file, use C<delete_all_macros> (or the C<reset_macros>
+option to L<Text::BibTeX::File/open>); to keep each file's macros to
+itself, use the C<private_macros> option.  Macro names are
+case-insensitive.  When C<Text::BibTeX> is loaded it defines the
+standard three-letter month macros (C<jan> to C<dec>).  If you wish
 to pre-define certain macros, use C<add_macro_text>.  (But note that the
 C<Bib> structure, as part of its mission to emulate BibTeX 0.99, defines
 the standard "month name" macros for you.)
@@ -735,10 +887,10 @@ names.
 Returns the length of a macro's expansion text.  If the macro is
 undefined, returns 0; no warning is issued.
 
-=item macro_text (MACRO [, FILENAME [, LINE]])    
+=item macro_text (MACRO [, FILENAME [, LINE]])
 
-Returns the expansion text of a macro.  If the macro is not defined,
-issues a warning and returns C<undef>.  FILENAME and LINE, if supplied,
+Returns the expansion text of a macro, as a (UTF-8 encoded) byte string.
+If the macro is not defined, issues a warning and returns C<undef>.  FILENAME and LINE, if supplied,
 are used for generating this warning; they should be supplied if you're
 looking up the macro as a result of finding it in a file.
 
@@ -776,23 +928,23 @@ the BibTeX style.
 
 =item _set_options (FORMAT_STRUCT, PART, ABBREV, JOIN_TOKENS, JOIN_PART)
 
-=item format_name (NAME_STRUCT, FORMAT_STRUCT)
+=item format_name (NAME_STRUCT, FORMAT_STRUCT [, UTF8])
 
 =back
 
 =head1 BUGS AND LIMITATIONS
 
-C<Text::BibTeX> inherits several limitations from its base C library,
-B<btparse>; see L<btparse/BUGS AND LIMITATIONS> for details.  In addition,
-C<Text::BibTeX> will not work with a Perl binary built using the C<sfio>
-library.  This is because Perl's I/O abstraction layer does not extend to
-third-party C libraries that use stdio, and B<btparse> most certainly does
-use stdio.
+The parser reads ahead in its input as far as it needs to: don't read
+from a filehandle yourself while a C<Text::BibTeX::File> (or
+C<Text::BibTeX::Entry::parse>) is reading from it.
+
+Name splitting follows BibTeX's rules, which are designed for Western
+names.  See L<btparse/BUGS AND LIMITATIONS> for the C library.
 
 =head1 SEE ALSO
 
 L<btool_faq>, L<Text::BibTeX::File>, L<Text::BibTeX::Entry>,
-L<Text::BibTeX::Value>
+L<Text::BibTeX::Value>, L<Text::BibTeX::Error>, L<btparse>
 
 =head1 AUTHOR
 

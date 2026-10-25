@@ -18,12 +18,12 @@
 
 package Text::BibTeX::Name;
 
-require 5.004;
-
+use 5.026;
 use strict;
+use warnings;
 use Carp;
-use vars qw'$VERSION';
-$VERSION = 0.88;
+
+our $VERSION = '1.00';
 
 use Text::BibTeX;
 
@@ -102,6 +102,8 @@ and makes few assumptions about whitespace.  In particular, there must be
 no leading whitespace, no trailing whitespace, no consecutive whitespace
 characters in the string, and no whitespace characters other than space.
 In other words, all whitespace must consist of lone internal spaces.
+(Field values from parsed entries are always like this.  Other strings
+are split without error, but the result may not be what you expect.)
 
 =head1 EXAMPLES
 
@@ -288,13 +290,18 @@ configuration values. At the moment the available values are:
 
 =item BINMODE
 
-Set the way Text::BibTeX deals with strings. By default it manages
-strings as bytes. You can set BINMODE to 'utf-8' to get NFC normalized
-UTF-8 strings and you can customise the normalization with the NORMALIZATION option.
+Set the way Text::BibTeX deals with strings: C<'utf-8'> (the default)
+to get Perl character strings, or C<'bytes'> for byte strings.  See
+L<Text::BibTeX/"STRINGS AND UNICODE">.
+
+=item NORMALIZATION
+
+The Unicode normalization form for strings in C<'utf-8'> mode: C<'NFC'>
+(the default), C<'NFD'>, C<'NFKC'>, C<'NFKD'> or C<'none'>.
 
    Text::BibTeX::Name->new(
       { binmode => 'utf-8', normalization => 'NFD' },
-      "Alberto Simões"});
+      "Alberto Simões");
 
 =back
 
@@ -302,23 +309,13 @@ UTF-8 strings and you can customise the normalization with the NORMALIZATION opt
 
 sub new {
     my $class = shift;
-    my $opts = ref $_[0] eq 'HASH' ? shift : {};
-
-    $opts->{ lc $_ } = $opts->{$_} for ( keys %$opts );
-
+    my $opts = ref $_[0] eq 'HASH' ? shift : undef;
     my ( $name, $filename, $line, $name_num ) = @_;
 
     $class = ref($class) || $class;
     my $self = bless { }, $class;
-
-    $self->{binmode} = 'bytes';
-    $self->{normalization} = 'NFC';
-    $self->{binmode} = 'utf-8'
-        if exists $opts->{binmode} && $opts->{binmode} =~ /utf-?8/i;
-    $self->{normalization} = $opts->{normalization} if exists $opts->{normalization};
-
-    $self->split( Text::BibTeX->_process_argument($name, $self->{binmode}, $self->{normalization}),
-        $filename, $line, $name_num, 1 )
+    @{$self}{qw(binmode normalization)} = Text::BibTeX::_options($opts);
+    $self->split( $name, $filename, $line, $name_num, 1 )
         if ( defined $name );
     $self;
 }
@@ -326,8 +323,7 @@ sub new {
 
 sub DESTROY
 {
-   my $self = shift;
-   $self->free;                         # free the C structure kept by `split'
+   # the C structure kept by `split' is freed with its Perl wrapper
 }
 
 
@@ -350,7 +346,9 @@ sub split
    my ($self, $name, $filename, $line, $name_num) = @_;
 
    # Call the XSUB with default values if necessary
-   $self->_split (Text::BibTeX->_process_argument($name, $self->{binmode}, $self->{normalization}), $filename, 
+   $self->_split (Text::BibTeX::_to_c($self->{binmode} // 'utf-8',
+                                    $self->{normalization} // 'NFC', $name),
+                  $filename,
                   defined $line ? $line : -1,
                   defined $name_num ? $name_num : -1,
                   1);
@@ -379,10 +377,8 @@ sub part {
 
     croak "unknown name part"
         unless $partname =~ /^(first|von|last|jr)$/;
-
     if ( exists $self->{$partname} ) {
-        my @x = map { Text::BibTeX->_process_result($_, $self->{binmode}, $self->{normalization}) }
-            @{ $self->{$partname} };
+        my @x = @{ $self->{$partname} };
         return @x > 1 ? @x : $x[0];
     }
     return undef;
