@@ -490,6 +490,26 @@ split_general_name (bt_name *name, int num_commas, int *comma_token,
 }
 
 
+/* A part made up only of empty tokens (from stray commas, as in
+ * ", John") is no part at all */
+static void
+drop_empty_parts (bt_name *name)
+{
+   int i, j;
+
+   for (i = 0; i < BT_MAX_NAMEPARTS; i++)
+   {
+      for (j = 0; j < name->part_len[i]; j++)
+         if (name->parts[i][j] != NULL)
+            break;
+      if (j == name->part_len[i])
+      {
+         name->parts[i] = NULL;
+         name->part_len[i] = 0;
+      }
+   }
+}
+
 static void
 empty_name (bt_name *name)
 {
@@ -537,12 +557,17 @@ bt_split_name (bt_errors *errs, const char *string,
    loc.name_num = name_num;
 
    num_commas = find_commas (&loc, name, MAX_COMMAS);
+   if (*name == 0)                      /* (check before find_tokens() puts */
+   {                                    /* NULs at the commas) */
+      free (name);
+      return split_name;
+   }
    tokens = find_tokens (name, comma_token, &num_comma_tokens, &loc);
    if (num_comma_tokens < num_commas)
       num_commas = num_comma_tokens;
    find_lc_tokens (tokens, &first_lc, &last_lc);
 
-   if (*name == 0 || tokens->num_items == 0)
+   if (tokens->num_items == 0)
    {
       bt_free_list (tokens);            /* frees `name' too */
       return split_name;
@@ -554,6 +579,10 @@ bt_split_name (bt_errors *errs, const char *string,
    else
       split_general_name (split_name, num_commas, comma_token,
                           first_lc, last_lc);
+   drop_empty_parts (split_name);
+
+   if (split_name->parts[BTN_LAST] == NULL)
+      name_warning (&loc, "name has no last name");
    return split_name;
 }
 

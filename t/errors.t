@@ -162,6 +162,21 @@ like($@, qr/invalid name format/, 'bad name format croaks');
       'second name is "name 2"');
 }
 
+# A name with no last name (eg. a stray leading comma) keeps its other
+# parts and is warned about
+{
+   my @seen;
+   local $Text::BibTeX::Error::Handler = sub { push @seen, shift };
+   my $e = Text::BibTeX::Entry->new("\@misc{k,\n  author = {, M.F. and Smith, John}}");
+   my @n = $e->names('author');
+   is(scalar(my @f = $n[0]->part('first')), 1, 'leading comma: first name kept');
+   is($n[0]->part('first'), 'M.F.', '...as the first name');
+   ok(!defined $n[0]->part('last'), '...and no last name');
+   is("$seen[0]", 'line 2, name 1, warning: name has no last name', 'warned about');
+   is(scalar @seen, 1, 'other names are fine');
+   is($n[1]->part('last'), 'Smith', 'next name unaffected');
+}
+
 # Reusing an entry object starts a fresh error list
 {
    local $Text::BibTeX::Error::Handler = sub { };
