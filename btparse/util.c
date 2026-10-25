@@ -35,6 +35,12 @@ check (void *p)
    return p;
 }
 
+void
+bt_free (void *p)
+{
+   free (p);
+}
+
 void *
 bt_xmalloc (size_t n)
 {

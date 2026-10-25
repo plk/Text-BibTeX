@@ -23,6 +23,9 @@
 
 #include "btparse.h"
 
+/* Memory allocated by btparse must be released by btparse (bt_free() and
+ * the bt_free_* functions): on Windows, free() here is Perl's allocator. */
+
 #define MY_CXT_KEY "Text::BibTeX::_guts" XS_VERSION
 
 typedef struct
@@ -559,7 +562,7 @@ purify_string (instr, options=0)
          XSRETURN_UNDEF;
       pure = bt_purify_string (s, (btshort) options);
       RETVAL = new_text (aTHX_ pure, utf8);
-      free (pure);
+      bt_free (pure);
    OUTPUT:
       RETVAL
 
@@ -579,7 +582,7 @@ change_case (transform, string, options=0)
       bt_errors_init (&errs);
       changed = bt_change_case (&errs, transform, s, (btshort) options);
       RETVAL = changed ? new_text (aTHX_ changed, utf8) : newSV (0);
-      free (changed);
+      bt_free (changed);
       sv_2mortal (RETVAL);
       dispatch_errors (aTHX_ &errs, utf8, NULL);
       SvREFCNT_inc_simple_void (RETVAL);
@@ -916,7 +919,7 @@ format_name (name, format, utf8=0)
       bt_errors_init (&errs);
       formatted = bt_format_name (&errs, name->name, format->format);
       RETVAL = sv_2mortal (new_text (aTHX_ formatted, utf8));
-      free (formatted);
+      bt_free (formatted);
       dispatch_errors (aTHX_ &errs, utf8, NULL);
       SvREFCNT_inc_simple_void (RETVAL);
    OUTPUT:

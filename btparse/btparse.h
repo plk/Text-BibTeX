@@ -323,6 +323,11 @@ char * bt_change_case (bt_errors *errs, char transform, const char *string,
 
 void bt_set_oom_handler (void (*handler) (void));
 
+/* Free a string (or other memory) returned by the library.  Use this
+ * rather than free(): on some platforms (eg. Perl on Windows) the caller's
+ * free() may be a different allocator from the library's. */
+void bt_free (void *p);
+
 /* Version of the Unicode database the character tables were built from */
 const char * bt_unicode_version (void);
 
